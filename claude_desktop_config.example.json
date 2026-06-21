@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "android-studio": {
+      "command": "E:\\Projekte\\Android-Studio-MCP\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "android_studio_mcp"],
+      "env": {
+        "ASMCP_WORKSPACE_ROOTS": "E:\\Projekte;C:\\Users\\Maurice"
+      }
+    }
+  }
+}

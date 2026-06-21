@@ -1,0 +1,17 @@
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.uv/
+build/
+dist/
+*.egg-info/
+
+# Local config & logs
+config.json
+scripts/*.log
+scripts/gradle_smoke.log
+
+# Test scratch
+_asmcp_smoke/

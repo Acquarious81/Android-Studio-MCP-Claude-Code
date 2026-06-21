@@ -1,0 +1,11 @@
+{
+  "_comment": "Optional config for android_studio_mcp. Copy to config.json (next to this file) or point ASMCP_CONFIG at it. Every field is optional; values are auto-discovered when omitted. Env vars override these.",
+  "studio_home": "C:\\Program Files\\Android\\Android Studio",
+  "android_sdk": "C:\\Users\\Maurice\\AppData\\Local\\Android\\Sdk",
+  "workspace_roots": [
+    "E:\\Projekte",
+    "C:\\Users\\Maurice"
+  ],
+  "builtin_server_port": 63342,
+  "gradle_launcher": ""
+}

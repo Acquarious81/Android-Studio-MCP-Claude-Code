@@ -1,0 +1,54 @@
+{
+  "manifest_version": "0.2",
+  "name": "android-studio-mcp",
+  "display_name": "Android Studio MCP",
+  "version": "1.0.0",
+  "description": "Operate Android Studio and the full Android toolchain (Gradle, ADB, emulator, SDK manager, APK analysis, headless inspection, live-IDE bridge, UI fallback).",
+  "long_description": "A professional MCP server that lets Claude build, test, lint, run on devices/emulators, analyse APKs, scaffold projects, inspect code headlessly and drive the live IDE. This bundle launches the project's tested uv virtual environment (no dependency vendoring), so it is ABI-safe and matches exactly what was verified during development.",
+  "author": { "name": "Maurice Putinas" },
+  "license": "MIT",
+  "server": {
+    "type": "python",
+    "entry_point": "src/android_studio_mcp/__main__.py",
+    "mcp_config": {
+      "command": "C:\\Users\\Maurice\\AppData\\Local\\hermes\\bin\\uv.exe",
+      "args": [
+        "--directory",
+        "E:\\Projekte\\Android-Studio-MCP",
+        "run",
+        "python",
+        "-m",
+        "android_studio_mcp"
+      ],
+      "env": {
+        "ASMCP_WORKSPACE_ROOTS": "${user_config.workspace_roots}",
+        "PYTHONUTF8": "1"
+      }
+    }
+  },
+  "user_config": {
+    "workspace_roots": {
+      "type": "string",
+      "title": "Erlaubte Arbeitsordner",
+      "description": "Mit Semikolon getrennte Ordner, in die Tools schreiben / Projekte anlegen dürfen (z. B. E:\\Projekte;C:\\Users\\Maurice).",
+      "default": "E:\\Projekte;C:\\Users\\Maurice",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": ["win32"]
+  },
+  "tools": [
+    { "name": "as_status", "description": "Full environment status (call first)." },
+    { "name": "as_run_app", "description": "Build, install & run an app on a device, capture logs." },
+    { "name": "as_gradle_assemble", "description": "Build APK(s) and report outputs." },
+    { "name": "as_gradle_test", "description": "Run tests with structured pass/fail parsing." },
+    { "name": "as_gradle_lint", "description": "Run Android Lint with structured findings." },
+    { "name": "as_inspect_code", "description": "Headless code inspection -> structured problems." },
+    { "name": "as_project_create", "description": "Scaffold a real Views/Compose project." },
+    { "name": "as_apk_info", "description": "APK package/version/permissions summary." },
+    { "name": "as_avd_start", "description": "Boot an emulator." },
+    { "name": "as_logcat_watch_start", "description": "Stream device logs you can poll." },
+    { "name": "as_ide_status", "description": "Live-IDE connectivity and plugin status." }
+  ]
+}

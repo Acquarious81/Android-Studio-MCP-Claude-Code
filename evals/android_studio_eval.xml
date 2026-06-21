@@ -1,0 +1,50 @@
+<!--
+  Evaluation set for android_studio_mcp (mcp-builder format).
+
+  Each question is read-only and answerable by calling the as_* tools / reading
+  the asmcp:// resources. Answers reflect THIS machine's toolchain at build time
+  (Android Studio AI-261, SDK at %LOCALAPPDATA%\Android\Sdk). Re-baseline the
+  answers if the toolchain changes. Run with the mcp-builder evaluation runner.
+-->
+<evaluation>
+  <qa_pair>
+    <question>Using the android-studio tools, report the exact Android Studio build number that is installed (the full build string, e.g. from as_status).</question>
+    <answer>AI-261.23567.138.2611.15503007</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>What ADB (Android Debug Bridge) version number does the toolchain report? Give just the version like 1.0.x.</question>
+    <answer>1.0.41</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>What is the major version of the bundled JBR Java runtime used as JAVA_HOME for builds?</question>
+    <answer>21</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>On which localhost TCP port does Android Studio's built-in web server listen (the one this MCP targets for live-IDE calls)?</question>
+    <answer>63342</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>What is the highest installed Android build-tools version on this machine?</question>
+    <answer>37.0.0</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>How many Android SDK platforms (android-XX) are installed? Count the entries under the SDK's platforms directory.</question>
+    <answer>3</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>What Gradle distribution version does a project created by as_project_create reference in its wrapper properties?</question>
+    <answer>8.11.1</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>What Android Gradle Plugin (AGP) version does a project scaffolded by as_project_create use?</question>
+    <answer>8.7.3</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>What is the default minSdk value used by as_project_create when none is specified?</question>
+    <answer>24</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>What is the absolute filesystem path of the Android SDK that this MCP server resolved (the 'sdk' value in as_config)?</question>
+    <answer>C:\Users\Maurice\AppData\Local\Android\Sdk</answer>
+  </qa_pair>
+</evaluation>

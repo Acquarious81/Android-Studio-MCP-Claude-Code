@@ -1,0 +1,8 @@
+<profile version="1.0">
+  <option name="myName" value="asmcp-default" />
+  <!--
+    Minimal profile: every inspection keeps its built-in default enablement and
+    severity. This gives broad, sensible coverage for headless `inspect` runs
+    without having to enumerate the full inspection catalogue.
+  -->
+</profile>
