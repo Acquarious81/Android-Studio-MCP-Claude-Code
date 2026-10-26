@@ -16,6 +16,8 @@ import asyncio
 import os
 import re
 import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
@@ -27,6 +29,11 @@ from .logging_setup import LOG
 CREATE_NO_WINDOW = 0x08000000
 DETACHED_PROCESS = 0x00000008
 CREATE_NEW_PROCESS_GROUP = 0x00000200
+
+# Nominal post-exit cleanup budget (seconds), shared by the post-kill wait
+# and every thread join. Each wait/join gets only the remaining time on a
+# monotonic clock; this is a nominal budget, not a real-time guarantee.
+_CLEANUP_BUDGET = 5.0
 
 MAX_CAPTURE_CHARS = 24_000  # cap returned stdout/stderr to keep context small
 
@@ -139,32 +146,48 @@ def _run_sync(
     timeout: float,
     input_text: Optional[str],
 ) -> CommandResult:
+    """Run args to completion (blocking) with bounded waits.
+
+    stdin: when ``input_text`` is not None (including "") the text is piped
+    to the child by a dedicated writer thread and stdin is closed when the
+    write completes - the same effect as piping text into a console. If
+    the child closes stdin early, the write failure is swallowed: delivery
+    of the remaining input is NOT guaranteed (only what the OS already
+    buffered may be consumed) and no hang or unhandled exception
+    propagates. With ``input_text=None`` (and only then) stdin is
+    /dev/null, so a child reading stdin just sees EOF.
+
+    Readers: stdout and stderr are drained concurrently, partial output
+    survives; redaction and truncation are unchanged.
+
+    Timeout: only the DIRECT child process is killed. Descendants are NOT
+    terminated and may keep the inherited pipe handles open. A single
+    monotonic cleanup budget (_CLEANUP_BUDGET) is armed only AFTER the
+    exit is observed (normal exit) or right after the kill (timeout
+    branch): every cleanup wait/join gets only the remaining time, so the
+    cleanup cost is never mixed with the command execution time and this
+    call returns at most about timeout + _CLEANUP_BUDGET later. Threads
+    that never see EOF (a descendant holding a pipe open) may still be
+    alive when this function returns: they are daemon threads that exit by
+    themselves once the pipe is finally closed; incomplete collection is
+    flagged via ``truncated`` and logged, which is a residual resource -
+    NOT a "complete cleanup". If the post-kill wait also expires, reaping
+    of the child is NOT guaranteed.
+    """
     norm = _normalize_args(args)
+    stdin_mode = subprocess.PIPE if input_text is not None else subprocess.DEVNULL
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             norm,
             cwd=cwd,
             env=env,
-            timeout=timeout,
-            input=input_text,
-            capture_output=True,
+            stdin=stdin_mode,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            creationflags=CREATE_NO_WINDOW,
-        )
-        out, t1 = _truncate(redact(proc.stdout or ""))
-        err, t2 = _truncate(redact(proc.stderr or ""))
-        return CommandResult(
-            args=list(norm), returncode=proc.returncode, stdout=out, stderr=err,
-            timed_out=False, truncated=t1 or t2, cwd=cwd,
-        )
-    except subprocess.TimeoutExpired as exc:
-        out, _ = _truncate(redact(_to_text(exc.stdout)))
-        err, _ = _truncate(redact(_to_text(exc.stderr)))
-        return CommandResult(
-            args=list(norm), returncode=-1, stdout=out, stderr=err,
-            timed_out=True, truncated=True, cwd=cwd,
+            creationflags=CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
         )
     except FileNotFoundError as exc:
         return CommandResult(
@@ -172,6 +195,113 @@ def _run_sync(
             stderr=f"Executable not found: {exc}", timed_out=False,
             truncated=False, cwd=cwd,
         )
+
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+
+    def _pump(stream, sink):
+        try:
+            for line in iter(stream.readline, ""):
+                sink.append(line)
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    def _feed_stdin(stream, text):
+        try:
+            if text:
+                stream.write(text)
+                stream.flush()
+        except (OSError, ValueError):
+            # Child closed stdin early or the pipe is broken: whatever the
+            # OS buffered may have been consumed, the rest is not sent.
+            # Never propagate to the caller.
+            pass
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    out_thread = threading.Thread(
+        target=_pump, name="runner-stdout-pump", args=(proc.stdout, stdout_parts))
+    err_thread = threading.Thread(
+        target=_pump, name="runner-stderr-pump", args=(proc.stderr, stderr_parts))
+    out_thread.daemon = err_thread.daemon = True
+    out_thread.start()
+    err_thread.start()
+
+    stdin_thread: Optional[threading.Thread] = None
+    if input_text is not None:
+        stdin_thread = threading.Thread(
+            target=_feed_stdin, name="runner-stdin-writer",
+            args=(proc.stdin, input_text))
+        stdin_thread.daemon = True
+        stdin_thread.start()
+
+    # Cleanup deadline: armed ONLY after the exit is observed (branches
+    # below) or right after the kill, so the shared _CLEANUP_BUDGET covers
+    # the cleanup steps and never the command execution time. Held in a
+    # one-element list because it is assigned from both branches.
+    _deadline: list[float] = []
+
+    def _left() -> float:
+        if not _deadline:
+            return 0.0
+        return max(0.0, _deadline[0] - time.monotonic())
+
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()  # direct child only; descendants are NOT killed
+        except Exception:
+            pass
+        _deadline[:] = [time.monotonic() + _CLEANUP_BUDGET]
+        reaped = True
+        try:
+            proc.wait(timeout=_left())
+        except subprocess.TimeoutExpired:
+            reaped = False
+            LOG.warning("run: child not confirmed reaped after kill deadline")
+        out_thread.join(timeout=_left())
+        err_thread.join(timeout=_left())
+        if stdin_thread is not None:
+            stdin_thread.join(timeout=_left())
+        alive = [t.name for t in (out_thread, err_thread, stdin_thread)
+                 if t is not None and t.is_alive()]
+        if alive:
+            LOG.warning(
+                "run: timeout - threads still blocked on inherited pipe"
+                " handles after kill: %s (partial output returned)", alive)
+        out, t1 = _truncate(redact("".join(stdout_parts)))
+        err, t2 = _truncate(redact("".join(stderr_parts)))
+        return CommandResult(
+            args=list(norm), returncode=-1, stdout=out, stderr=err,
+            timed_out=True, truncated=t1 or t2 or bool(alive), cwd=cwd,
+        )
+
+    # Normal path: the cleanup budget starts NOW, after the exit was
+    # observed - not during the command execution.
+    _deadline[:] = [time.monotonic() + _CLEANUP_BUDGET]
+    out_thread.join(timeout=_left())
+    err_thread.join(timeout=_left())
+    if stdin_thread is not None:
+        stdin_thread.join(timeout=_left())
+    alive = [t.name for t in (out_thread, err_thread, stdin_thread)
+             if t is not None and t.is_alive()]
+    if alive:
+        LOG.warning(
+            "run: child exited but threads still blocked on inherited pipe"
+            " handles: %s (partial output returned)", alive)
+    out, t1 = _truncate(redact("".join(stdout_parts)))
+    err, t2 = _truncate(redact("".join(stderr_parts)))
+    return CommandResult(
+        args=list(norm), returncode=proc.returncode, stdout=out, stderr=err,
+        timed_out=False, truncated=t1 or t2 or bool(alive), cwd=cwd,
+    )
 
 
 async def run(
