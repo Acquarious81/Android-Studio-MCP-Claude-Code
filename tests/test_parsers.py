@@ -70,6 +70,68 @@ def test_sdkmanager_list():
     assert any(p["path"] == "platforms;android-35" for p in parsed["available"])
 
 
+def test_sdkmanager_list_column_format():
+    # Formato a colonne osservato nello stdout reale di sdkmanager:
+    # colonne allineate, nessun pipe, descrizioni con spazi interni.
+    out = (
+        "Installed packages:\n"
+        "  build-tools/36.1.0                  36.1.0                             Android SDK Build-Tools 36.1\n"
+        "  cmdline-tools/latest                23.0.0                             Android SDK Command-line Tools (latest)\n"
+        "  emulator                           37.1.11         ->        37.2.12  Android Emulator\n"
+        "  platform-tools                     37.0.1                             Android SDK Platform-Tools\n"
+    )
+    parsed = parse_sdkmanager_list(out)
+    assert parsed["available"] == []  # no available packages invented
+    installed = parsed["installed"]
+    assert len(installed) == 4
+    paths = [p["path"] for p in installed]
+    assert paths == [
+        "build-tools/36.1.0", "cmdline-tools/latest", "emulator", "platform-tools",
+    ]
+    by_path = {p["path"]: p for p in installed}
+    assert by_path["build-tools/36.1.0"]["version"] == "36.1.0"
+    assert by_path["build-tools/36.1.0"]["description"] == "Android SDK Build-Tools 36.1"
+    assert by_path["cmdline-tools/latest"]["version"] == "23.0.0"
+    assert by_path["cmdline-tools/latest"]["description"] == "Android SDK Command-line Tools (latest)"
+    assert by_path["platform-tools"]["version"] == "37.0.1"
+    assert by_path["platform-tools"]["description"] == "Android SDK Platform-Tools"
+    assert by_path["emulator"]["path"] == "emulator"
+    assert by_path["emulator"]["version"] == "37.1.11"
+    assert by_path["emulator"]["description"] == "Android Emulator"
+
+
+def test_sdkmanager_list_ignores_headers_and_separators():
+    # Header rows, dashed separators and blank lines must never become
+    # records, in either format. The comparisons below are exact, so no
+    # junk record can slip through.
+    col = (
+        "Installed packages:\n"
+        "  Path                Version        Description\n"
+        "  ------              -------        -----------\n"
+        "\n"
+        "  platform-tools      37.0.1         Android SDK Platform-Tools\n"
+    )
+    parsed_col = parse_sdkmanager_list(col)
+    assert parsed_col == {
+        "installed": [{"path": "platform-tools", "version": "37.0.1",
+                       "description": "Android SDK Platform-Tools"}],
+        "available": [],
+    }
+
+    pipe = (
+        "Installed packages:\n"
+        "  Path | Version | Description | Location\n"
+        "  ------- | -------- | ------------- | --------\n"
+        "  platform-tools | 37.0.0 | Android SDK Platform-Tools |\n"
+    )
+    parsed_pipe = parse_sdkmanager_list(pipe)
+    assert parsed_pipe == {
+        "installed": [{"path": "platform-tools", "version": "37.0.0",
+                       "description": "Android SDK Platform-Tools"}],
+        "available": [],
+    }
+
+
 # --- parse_aapt_badging (the minSdk regression) ----------------------------
 
 def test_aapt_badging_new_format():

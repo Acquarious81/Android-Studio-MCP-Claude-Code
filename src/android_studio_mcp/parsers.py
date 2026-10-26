@@ -153,13 +153,33 @@ def parse_sdkmanager_list(stdout: str) -> dict:
         if low.startswith("available packages") or low.startswith("available updates"):
             section = "available"
             continue
-        if not line.strip() or set(line.strip()) <= {"-"} or line.strip().startswith("Path"):
+        # Skip blank lines and headers/separators made only of dashes,
+        # whitespace and optional pipes (e.g. "------  -------",
+        # "--- | ---- | ----"). A line that passes this filter is not
+        # automatically a data record: it still has to be recognised by
+        # the pipe or column branch below.
+        if (not line.strip()
+                or not re.search(r"[^\s|\-]", line)
+                or line.strip().startswith("Path")):
             continue
         parts = [p.strip() for p in line.split("|")]
         if len(parts) >= 2 and section:
             rec = {"path": parts[0], "version": parts[1] if len(parts) > 1 else None,
                    "description": parts[2] if len(parts) > 2 else None}
             (installed if section == "installed" else available).append(rec)
+        elif "|" not in line and section:
+            # Formato a colonne osservato nello stdout reale di sdkmanager:
+            # colonne allineate con spazi, nessun pipe. Le descrizioni
+            # contengono spazi singoli, quindi si delimita sulle sequenze di
+            # 2+ spazi; un "  ->  " opzionale marca la versione aggiornabile,
+            # scartata (non entra in version ne in description).
+            m = re.match(r"^(?P<path>\S+)\s{2,}(?P<version>\S+)"
+                         r"(?:\s{2,}->\s{2,}(?P<update>\S+))?"
+                         r"\s{2,}(?P<description>.+)$", line.strip())
+            if m:
+                rec = {"path": m.group("path"), "version": m.group("version"),
+                       "description": m.group("description").strip()}
+                (installed if section == "installed" else available).append(rec)
     return {"installed": installed, "available": available}
 
 
