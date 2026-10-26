@@ -1,121 +1,171 @@
-"""Bridge to Android Studio's built-in JetBrains MCP server (`stdioMcpServer`).
-
-The IDE declares a custom launcher command ``studio64.exe stdioMcpServer`` whose
-main class is ``com.intellij.mcpserver.stdio.McpStdioRunnerKt``. When the MCP
-Server plugin is installed and an IDE instance is running, this speaks MCP over
-stdio and proxies tool calls to the live IDE.
-
-This module performs a bounded JSON-RPC handshake (initialize -> tools/list or
-tools/call) and returns the result. It degrades gracefully: if the plugin is not
-installed or the bridge does not respond, it returns a structured explanation
-instead of hanging.
-"""
+"""Bridge to the live Android Studio MCP server using the MCP Python SDK."""
 
 from __future__ import annotations
 
 import asyncio
-import json
-import subprocess
-from typing import Any, Optional
+import os
+from pathlib import Path
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
 from .config import CONFIG
-from .logging_setup import LOG
-from .runner import CREATE_NO_WINDOW, build_env
+from .runner import build_env
+
+
+PLUGIN_JARS = (
+    "mcpserver.jar",
+    "io.modelcontextprotocol.kotlin.sdk.jar",
+    "io.github.oshai.kotlin.logging.jvm.jar",
+)
+
+IDE_JARS = (
+    "util-8.jar",
+    "intellij.libraries.kotlinx.coroutines.core.jar",
+    "intellij.libraries.ktor.client.cio.jar",
+    "intellij.libraries.ktor.client.jar",
+    "intellij.libraries.ktor.network.tls.jar",
+    "intellij.libraries.ktor.io.jar",
+    "intellij.libraries.ktor.utils.jar",
+    "intellij.libraries.kotlinx.io.jar",
+    "intellij.libraries.kotlinx.serialization.core.jar",
+    "intellij.libraries.kotlinx.serialization.json.jar",
+)
+
+
+def _plugin_candidates() -> tuple[Path, ...]:
+    return (
+        CONFIG.config_dir / "plugins" / "mcpserver",
+        CONFIG.studio_home / "plugins" / "mcpserver",
+    )
+
+
+def _plugin_dir() -> Path | None:
+    for directory in _plugin_candidates():
+        if (directory / "lib" / "mcpserver.jar").is_file():
+            return directory
+    return None
 
 
 def plugin_available() -> bool:
-    """Heuristic: the official MCP Server plugin ships a 'mcpserver' plugin dir."""
-    return (CONFIG.studio_home / "plugins" / "mcpserver").exists()
+    """Check user-installed and bundled locations for the MCP plugin."""
+    return _plugin_dir() is not None
 
 
-def _handshake_sync(payloads: list[dict], timeout: float) -> dict:
-    """Spawn the stdio MCP, send the given JSON-RPC payloads, collect responses."""
-    if not CONFIG.studio_exe.exists():
-        return {"ok": False, "error": f"studio64.exe not found at {CONFIG.studio_exe}"}
-    cmd = [str(CONFIG.studio_exe), "stdioMcpServer"]
-    try:
-        proc = subprocess.Popen(
-            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace", env=build_env(),
-            creationflags=CREATE_NO_WINDOW,
+def _server_parameters() -> StdioServerParameters:
+    plugin = _plugin_dir()
+    if plugin is None:
+        searched = ", ".join(str(path) for path in _plugin_candidates())
+        raise FileNotFoundError(
+            f"MCP Server plugin not found. Searched: {searched}"
         )
-    except Exception as exc:
-        return {"ok": False, "error": f"failed to spawn stdio MCP: {exc}"}
 
-    stdin_data = "".join(json.dumps(p) + "\n" for p in payloads)
-    try:
-        out, errtext = proc.communicate(input=stdin_data, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        # Reap the killed process without a second communicate() (which can hang
-        # on Windows after kill). wait() releases the handle; terminate() is a
-        # last-resort if it is somehow still alive.
-        try:
-            proc.wait(timeout=10)
-        except Exception:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-        return {"ok": False, "error": "stdio MCP did not respond within the timeout"}
+    java = CONFIG.java_exe
+    if not java.is_file():
+        raise FileNotFoundError(f"Java not found at {java}")
 
-    responses = []
-    for line in (out or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            responses.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return {"ok": True, "responses": responses, "stderr": (errtext or "")[:2000]}
-
-
-def _init_payloads(extra: Optional[list[dict]] = None) -> list[dict]:
-    payloads = [
-        {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-         "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                    "clientInfo": {"name": "android-studio-mcp-bridge", "version": "1.0.0"}}},
-        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+    jars = [
+        *(plugin / "lib" / name for name in PLUGIN_JARS),
+        *(CONFIG.studio_home / "lib" / name for name in IDE_JARS),
     ]
-    if extra:
-        payloads.extend(extra)
-    return payloads
+
+    missing = [str(path) for path in jars if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "Missing MCP classpath files:\n" + "\n".join(missing)
+        )
+
+    env = dict(build_env())
+    env.setdefault("IJ_MCP_SERVER_PORT", "64342")
+
+    return StdioServerParameters(
+        command=str(java),
+        args=[
+            "-classpath",
+            os.pathsep.join(str(path) for path in jars),
+            "com.intellij.mcpserver.stdio.McpStdioRunnerKt",
+        ],
+        env=env,
+    )
+
+
+def _error_text(exc: BaseException) -> str:
+    children = getattr(exc, "exceptions", None)
+    if children:
+        return "; ".join(_error_text(child) for child in children)
+
+    message = str(exc).strip()
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
 
 
 async def list_tools(timeout: float = 60.0) -> dict:
-    """Return the tools exposed by the live IDE's MCP server (best-effort)."""
-    if not plugin_available():
-        return {"ok": False, "available": False,
-                "error": "The official 'MCP Server' plugin (com.intellij.mcpServer) is not "
-                         "installed in this Android Studio, so stdioMcpServer cannot serve "
-                         "live-IDE tools. Install it from Settings > Plugins (Marketplace), "
-                         "or rely on the CLI/Gradle/ADB tools which do not need it."}
-    payloads = _init_payloads([{"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}])
-    res = await asyncio.to_thread(_handshake_sync, payloads, timeout)
-    if not res.get("ok"):
-        return {"ok": False, "available": True, **res}
-    tools = None
-    for r in res["responses"]:
-        if r.get("id") == 2 and "result" in r:
-            tools = r["result"].get("tools")
-    return {"ok": tools is not None, "available": True, "tools": tools, "raw": res["responses"]}
+    """List tools from the live IDE through an initialized MCP session."""
+    available = plugin_available()
+
+    try:
+        server = _server_parameters()
+
+        async with asyncio.timeout(timeout):
+            async with stdio_client(server) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+
+                    tools = []
+                    cursor = None
+
+                    while True:
+                        page = await session.list_tools(cursor=cursor)
+                        tools.extend(
+                            tool.model_dump(mode="json", by_alias=True)
+                            for tool in page.tools
+                        )
+                        cursor = page.nextCursor
+                        if not cursor:
+                            break
+
+        return {
+            "ok": True,
+            "available": True,
+            "tools": tools,
+        }
+
+    except Exception as exc:
+        return {
+            "ok": False,
+            "available": available,
+            "error": _error_text(exc),
+        }
 
 
-async def call_tool(name: str, arguments: dict, timeout: float = 120.0) -> dict:
-    """Invoke a named tool on the live IDE's MCP server (best-effort)."""
-    if not plugin_available():
-        return {"ok": False, "available": False,
-                "error": "The official 'MCP Server' plugin is not installed; cannot call "
-                         "live-IDE MCP tools."}
-    payloads = _init_payloads([
-        {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-         "params": {"name": name, "arguments": arguments}}])
-    res = await asyncio.to_thread(_handshake_sync, payloads, timeout)
-    if not res.get("ok"):
-        return {"ok": False, "available": True, **res}
-    result = None
-    for r in res["responses"]:
-        if r.get("id") == 2:
-            result = r.get("result") or {"error": r.get("error")}
-    return {"ok": result is not None, "available": True, "result": result}
+async def call_tool(
+    name: str,
+    arguments: dict,
+    timeout: float = 120.0,
+) -> dict:
+    """Invoke an IDE tool through an initialized MCP session."""
+    available = plugin_available()
+
+    try:
+        server = _server_parameters()
+
+        async with asyncio.timeout(timeout):
+            async with stdio_client(server) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(
+                        name,
+                        arguments=arguments,
+                    )
+
+        return {
+            "ok": True,
+            "available": True,
+            "result": result.model_dump(mode="json", by_alias=True),
+        }
+
+    except Exception as exc:
+        return {
+            "ok": False,
+            "available": available,
+            "error": _error_text(exc),
+        }
